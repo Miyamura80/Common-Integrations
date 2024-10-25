@@ -19,7 +19,9 @@ Note: Ensure that the SLACK_BOT_TOKEN is properly set in the global configuratio
 
 from global_config import global_config
 from slack_sdk import WebClient
-from slack_sdk.errors import SlackApiError
+from typing import Optional
+
+import warnings
 
 
 class Slack:
@@ -36,7 +38,7 @@ class Slack:
         """
         self.client = WebClient(token=global_config.SLACK_BOT_TOKEN)
 
-    def send_message(self, channel_name, text):
+    def send_message(self, channel_name: str, text: str) -> Optional[str]:
         """
         Sends a message to a specified Slack channel and returns the message ID.
 
@@ -50,71 +52,51 @@ class Slack:
         Raises:
             SlackApiError: If there's an error sending the message.
         """
+        if not self._check_channel_exists(channel_name):
+            raise ValueError(f"Channel '{channel_name}' does not exist")
+
         if channel_name.startswith("#"):
             channel_name = channel_name[1:]
-        try:
-            response = self.client.chat_postMessage(channel=channel_name, text=text)
-            return response["ts"]
-        except SlackApiError as e:
-            print(f"Error sending message to Slack: {e}")
-            return None
 
-    def send_file(self, channel_name, file_path, initial_comment):
+        response = self.client.chat_postMessage(channel=channel_name, text=text)
+        return response["ts"]
+
+    def send_file(self, channel_name, file_path, initial_comment) -> Optional[str]:
         """
-        Uploads a file to a specified Slack channel.
+        Uploads a file to a specified Slack channel and returns the thread timestamp.
 
         Args:
             channel (str): The name or ID of the channel to upload the file to.
             file_path (str): The path to the file to be uploaded.
             initial_comment (str): A comment to accompany the file upload.
 
+        Returns:
+            str: The thread timestamp that can be used for replies.
+
         Raises:
             SlackApiError: If there's an error uploading the file.
-        """
-        try:
-            channel_id = self._get_channel_id(channel_name)
-
-            self.client.files_upload_v2(
-                channel=channel_id, file=file_path, initial_comment=initial_comment
-            )
-        except SlackApiError as e:
-            print(f"Error sending file to Slack: {e}")
-
-    def _get_channel_id(self, channel_name):
-        """
-        Retrieves the channel ID for a given channel name.
-
-        Args:
-            channel_name (str): The name of the channel (with or without '#').
-
-        Returns:
-            str or None: The channel ID if found, None otherwise.
-
-        Raises:
-            SlackApiError: If there's an error retrieving the channel list.
         """
         if channel_name.startswith("#"):
             channel_name = channel_name[1:]
 
-        try:
-            result = self.client.conversations_list()
-            channels = result["channels"]
+        if not self._check_channel_exists(channel_name):
+            raise ValueError(f"Channel '{channel_name}' does not exist")
 
-            print([channel["name"] for channel in channels])
+        channel_id = self._get_channel_id(channel_name)
 
-            for channel in channels:
-                if channel["name"] == channel_name:
-                    return channel["id"]
+        # Upload the file
+        file_upload = self.client.files_upload_v2(
+            channel=channel_id,  # Use channel ID here
+            file=file_path,
+            initial_comment=initial_comment,
+        )
 
-            return None
-
-        except SlackApiError as e:
-            print(f"Error getting channel ID: {e}")
-            return None
+        return file_upload["file"]["timestamp"]
 
     def send_thread_reply(self, channel_name: str, thread_ts: str, text: str) -> str:
         """
         Sends a reply to a thread in a specified Slack channel.
+        WARNING: If thread_ts is None, it will not raise an error, instead it sends on channel
 
         Args:
             channel_name (str): The name or ID of the channel containing the thread.
@@ -129,14 +111,20 @@ class Slack:
         """
         if channel_name.startswith("#"):
             channel_name = channel_name[1:]
-        try:
-            response = self.client.chat_postMessage(
-                channel=channel_name, text=text, thread_ts=thread_ts
-            )
-            return response["ts"]
-        except SlackApiError as e:
-            print(f"Error sending thread reply to Slack: {e}")
-            return None
+
+        if not self._check_channel_exists(channel_name):
+            raise ValueError(f"Channel '{channel_name}' does not exist")
+        if not thread_ts:
+            raise ValueError("thread_ts is required")
+
+        response = self.client.chat_postMessage(
+            channel=channel_name, text=text, thread_ts=thread_ts
+        )
+
+        if response["ts"] is None:
+            warnings.warning("Failed to send thread reply: response timestamp is None")
+
+        return response["ts"]
 
     def edit_message(self, channel_name: str, message_ts: str, new_text: str) -> bool:
         """
@@ -155,19 +143,44 @@ class Slack:
         """
         if channel_name.startswith("#"):
             channel_name = channel_name[1:]
-        try:
-            channel_id = self._get_channel_id(channel_name)
-            if not channel_id:
-                print(f"Error: Channel '{channel_name}' not found.")
-                return False
 
-            response = self.client.chat_update(
-                channel=channel_id, ts=message_ts, text=new_text
-            )
-            return response["ok"]
-        except SlackApiError as e:
-            print(f"Error editing message in Slack: {e}")
+        if not self._check_channel_exists(channel_name):
+            raise ValueError(f"Channel '{channel_name}' does not exist")
+
+        if not message_ts:
+            raise ValueError("message_ts is required")
+
+        channel_id = self._get_channel_id(channel_name)
+        if not channel_id:
+            print(f"Error: Channel '{channel_name}' not found.")
             return False
+
+        response = self.client.chat_update(
+            channel=channel_id, ts=message_ts, text=new_text
+        )
+        return response["ok"]
+
+    def _get_channel_id(self, channel_name: str) -> Optional[str]:
+        """
+        Checks if a channel exists by name.
+        """
+        if channel_name.startswith("#"):
+            channel_name = channel_name[1:]
+
+        channels = self.client.conversations_list()
+        channel_id = None
+        for channel in channels["channels"]:
+            if channel["name"] == channel_name:
+                channel_id = channel["id"]
+                break
+
+        return channel_id
+
+    def _check_channel_exists(self, channel_name: str) -> bool:
+        """
+        Checks if a channel exists by name.
+        """
+        return self._get_channel_id(channel_name) is not None
 
 
 if __name__ == "__main__":
